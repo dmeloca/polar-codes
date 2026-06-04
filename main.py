@@ -1,6 +1,13 @@
-from helpers.channels import BinarySymmetricChannel, CombinedChannel
+import numpy as np
 
-channel = CombinedChannel(BinarySymmetricChannel(0.3))
-print(f"Z(W^-) = {channel.minus()}")
-print(f"Z(W^+) = {channel.plus()}")
-print(f"Z(W) = {channel.bhattacharyya()}")
+from src.polarcodes import PolarCode, PolarEncoder
+
+code = PolarCode(N=8, K=4, frozen_positions={0, 1, 2, 4})
+encoder = PolarEncoder(code)
+
+info_bits = np.array([1, 0, 1, 1], dtype=np.uint8)
+codeword = encoder.encode(info_bits)
+
+print(f"Code rate : {code.rate}")
+print(f"Info bits : {info_bits}")
+print(f"Codeword  : {codeword}")
