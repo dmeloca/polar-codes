@@ -2,7 +2,7 @@ import numpy as np
 
 from src.polarcodes import PolarCode, PolarEncoder
 
-code = PolarCode(N=8, K=4, frozen_positions={0, 1, 2, 4})
+code = PolarCode(N=8, K=4, frozen_positions=frozenset({0, 1, 2, 4}))
 encoder = PolarEncoder(code)
 
 info_bits = np.array([1, 0, 1, 1], dtype=np.uint8)
