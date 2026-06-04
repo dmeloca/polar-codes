@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.polarcodes import PolarCode, PolarEncoder
+from src.core import PolarCode, PolarEncoder
 
 code = PolarCode(N=8, K=4, frozen_positions=frozenset({0, 1, 2, 4}))
 encoder = PolarEncoder(code)
