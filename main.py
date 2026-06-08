@@ -1,21 +1,25 @@
 import numpy as np
 
 from src.channels import AWGNChannel, BECChannel
-from src.core import PolarCode, PolarEncoder, awgn_frozen_set, bec_frozen_set
+from src.core import PolarCode, PolarEncoder, awgn_frozen_set, bec_frozen_set, sc_decode
 
 N, K = 8, 4
-info_bits = np.array([1, 0, 1, 1], dtype=np.uint8)
+info_bits = np.array([1, 1, 0, 1], dtype=np.uint8)
 
 # ── BEC ──────────────────────────────────────────────────────────────────────
 epsilon = 0.3
 frozen_bec = bec_frozen_set(N, K, epsilon)
 codeword_bec = PolarEncoder(PolarCode(N, K, frozen_bec)).encode(info_bits)
 llrs_bec = BECChannel(epsilon).transmit(codeword_bec)
+raw_estimate = sc_decode(frozen_bec, codeword_bec, BECChannel(epsilon))
+no_frozen_estimate = np.array([int(raw_estimate[i]) for i in range(raw_estimate.size) if i not in frozen_bec])
 
 print("-- BEC --")
+print(f"Target   : {info_bits}")
 print(f"Frozen   : {sorted(frozen_bec)}")
 print(f"Codeword : {codeword_bec}")
 print(f"LLRs     : {llrs_bec}")
+print(f"Estimate : {no_frozen_estimate}")
 
 # ── AWGN ─────────────────────────────────────────────────────────────────────
 snr_db = 2.0

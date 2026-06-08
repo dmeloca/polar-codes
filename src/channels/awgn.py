@@ -31,3 +31,6 @@ class AWGNChannel:
         x = 1.0 - 2.0 * codeword.astype(np.float64)  # 0 → +1, 1 → −1
         y = x + np.random.normal(0.0, self._sigma, x.shape)
         return 2.0 * y / self._sigma ** 2
+    
+    def w_rule(self, target_bit: float, given_bit: float) -> float:
+        pass

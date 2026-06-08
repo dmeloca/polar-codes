@@ -18,3 +18,11 @@ class BECChannel:
         erased = np.random.random(len(codeword)) < self.epsilon
         llrs[erased] = 0.0
         return llrs
+    
+    def w_rule(self, target_bit: float, given_bit: float) -> float:
+        if (target_bit == 0 and given_bit == 1) or (target_bit == 1 and given_bit == 0):
+            return 0
+        elif target_bit != 0 and target_bit != 1:
+            return self.epsilon
+        else:
+            return 1 - self.epsilon
