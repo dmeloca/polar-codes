@@ -16,10 +16,10 @@ class BECChannel:
     def transmit(self, codeword: np.ndarray, mode: str = "llrs") -> np.ndarray:
         if mode == "lrs":
             #* 0 => (1-e)/0 = inf  |  1 => 0/(1-e) = 0
-            llrs = np.where(codeword == 0, np.inf, 0.0).astype(np.float64)
+            lrs = np.where(codeword == 0, np.inf, 0.0).astype(np.float64)
             erased = np.random.random(len(codeword)) < self.epsilon
-            llrs[erased] = 1.0 #*Uncertainty
-            return llrs
+            lrs[erased] = 1.0 #*Uncertainty
+            return lrs
         else:
             llrs = np.where(codeword == 0, np.inf, -np.inf).astype(np.float64)
             erased = np.random.random(len(codeword)) < self.epsilon

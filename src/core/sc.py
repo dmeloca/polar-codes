@@ -61,7 +61,7 @@ class SyntheticVectorChannel:
 
         return vect @ self.F_N
 
-def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> float:
+def L_i(i: int, codeword: np.ndarray, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> float:
     """
 
     Params
@@ -79,6 +79,9 @@ def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNCha
 
     half_i: int = 0
 
+    # print("u_estimate:", u_estimate)
+    # print("codeword:", codeword)
+
     # import pdb; pdb.set_trace()
     # print("-------")
     # print("u_estimate:", u_estimate, u_estimate.size, "i:", i)
@@ -91,7 +94,7 @@ def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNCha
         #*they are done that way since the indices start on 1 in the paper.
         #*The slicing goes up to u_estimate.size - 1 (exclusive) because we are
         #*taking u_1^{2i-2} from u_1^{2i-1} (u_estimate)
-        # print("Even i")
+        print("Even i", i)
         #*Taking u_1^{2i-2} (prev) as estimate and u_1^{2i-1} for the exponent
         u_prev: np.ndarray = u_estimate[:-1]
         u_exp: np.ndarray = u_estimate[-1]
@@ -106,31 +109,36 @@ def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNCha
         # print("Even estimate:", even_estimate)
         # print("Sum estimate:", even_estimate)
         exp = (1 - 2*u_exp)
-        left = L_i(half_i, lr_1N[0:half_N], sum_estimate, base_channel)
-        right = L_i(half_i, lr_1N[half_N:N], even_estimate, base_channel)
+        left = L_i(half_i, codeword[0:half_N], lr_1N[0:half_N], sum_estimate, base_channel)
+        right = L_i(half_i, codeword[half_N:N], lr_1N[half_N:N], even_estimate, base_channel)
+        # print("Left:", left)
+        # print("Right:", right)
 
         if left == np.inf:
             if right == 0:
                 if exp == 1:
-                    return 1
+                    result = 1
                 else:
-                    return 0
+                    result = 0
             elif right == np.inf and exp == -1:
-                return 1
+                result = 1
             else:
-                return (float(left)**exp) * right
+                result = (float(left)**exp) * right
         elif left == 0:
             if right == 0 and exp == -1:
-                return np.inf
+                result = np.inf
             elif right == np.inf:
                 if exp == 1:
-                    return 1
+                    result = 1
                 else:
-                    return np.inf
+                    result = np.inf
             else:
-                return (float(left)**exp) * right
+                result = (float(left)**exp) * right
         else:
-            return (float(left)**exp) * right
+            result = (float(left)**exp) * right
+
+        # print("Result:", result)
+        return result
         
         # if left == 0 and u_exp == 1:
         #     left = np.inf
@@ -142,8 +150,8 @@ def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNCha
         # print(f"L_i(i={i}, N={N}) -> {result}")
         
     else:
-        if i != 1 or N != 1:
-            # print("Odd i")
+        if N != 1: #*the i != 1 condition is redundant
+            print("Odd i", i)
             half_i: int = int((i + 1) / 2) #*Because i = ((i + 1) / 2) - 1
             #*The slicing goes up to u_estimate.size (exclusive) because
             #*2 * half_i - 2 is even
@@ -158,27 +166,32 @@ def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNCha
             # print("Odd estimate:", odd_estimate)
             # print("Even estimate:", even_estimate)
             # print("Sum estimate:", even_estimate)
-            left: float = L_i(half_i, lr_1N[0:half_N], sum_estimate, base_channel)
-            right: float = L_i(half_i, lr_1N[half_N:N], even_estimate, base_channel)
+            left: float = L_i(half_i, codeword[0:half_N], lr_1N[0:half_N], sum_estimate, base_channel)
+            right: float = L_i(half_i, codeword[half_N:N], lr_1N[half_N:N], even_estimate, base_channel)
             # if (left == np.inf and right == 0) or (right == np.inf and left == 0):
             #     print("warning")
             if left == np.inf and right == 0:
-                return 0
+                result = 0
             elif left == 0 and right == np.inf:
-                return 0
+                result = 0
             elif left == np.inf and right == np.inf:
-                return np.inf
+                result = np.inf
             elif (left == np.inf and right == 1) or (left == 1 and right == np.inf):
-                return 1
+                result = 1
             elif left == 0 and right == 0:
-                return np.inf
+                result = np.inf
             else:
                 num = left*right+1
                 den = left+right
+                # print("Left:", left)
+                # print("Right:", right)
                 if den == 0 and num != 0:
-                    return np.inf
+                    result = np.inf
                 else:
-                    return num / den
+                    result = num / den
+
+            # print("Result:", result)
+            return result
             
         else: #*i = 1 AND N = 1; last recursive step
             return lr_1N[0]
@@ -200,24 +213,26 @@ def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNCha
             #     return zero_rule / one_rule
                 
 
-def h_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> int:
+def h_i(i: int, codeword: np.ndarray, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> int:
     # print("----------------")
-    lr: float = L_i(i, lr_1N, u_estimate, base_channel)
+    lr: float = L_i(i, codeword, lr_1N, u_estimate, base_channel)
     if lr >= 1:
         return 0
     else:
         return 1
 
-def sc_decode(frozen_bits: np.ndarray, lr_1N: np.ndarray, base_channel: AWGNChannel | BECChannel) -> np.ndarray:
+def sc_decode(frozen_bits: np.ndarray, codeword: np.ndarray, lr_1N: np.ndarray, base_channel: AWGNChannel | BECChannel) -> np.ndarray:
     # print(y.size)
     u_i: float = None
     u_is: list[float] = []
 
     for i in range(lr_1N.size): #*Traverse the indices
+        u_i = None
         if i in frozen_bits:
             u_i = FROZEN_BIT_VALUE
         else:
-            u_i = h_i(i+1, lr_1N, np.array(u_is), base_channel)
+            # if i == 7:
+            u_i = h_i(i+1, codeword, lr_1N, np.array(u_is), base_channel)
         u_is.append(u_i)
 
     return np.array(u_is)
