@@ -61,13 +61,7 @@ class SyntheticVectorChannel:
 
         return vect @ self.F_N
 
-def synthesized_vector_channel(y_1N: np.ndarray, u_1N: np.ndarray) -> float:
-    """
-    Calculation of the W_N rule given a y_1^N output vector (`y_1N`) and an input vector from the source (`u_1N`)
-    """
-    pass
-
-def L_i(i: int, y_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> float:
+def L_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> float:
     """
 
     Params
@@ -75,97 +69,155 @@ def L_i(i: int, y_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChan
     - u_estimate: np.ndarray
         Corresponds to u_1^{i-1} or u_1^{2*half_i - 2}
     """
-    N: int = int(y_1N.size)
-    half_i: int = 0
+    N: int = int(lr_1N.size)
     half_N: int = int(N/2)
+
+    # if N == 1: #*Base case
+    #     w1 = base_channel.w_rule(lr_1N[0], 1)
+    #     w0 = base_channel.w_rule(lr_1N[0], 0)
+    #     return np.inf if w1 == 0 else w0 / w1
+
+    half_i: int = 0
 
     # import pdb; pdb.set_trace()
     # print("-------")
     # print("u_estimate:", u_estimate, u_estimate.size, "i:", i)
-    # print(N, "y_estimate", y_1N)
+    # print(N, "lr_estimate", lr_1N)
     # if u_estimate.size == 0:
     #     print("Warning, u_estimate is size 0:", u_estimate)
     if i % 2 == 0:
         half_i = int(i / 2)
         #*The following naming conventions may sound contradictory. However,
         #*they are done that way since the indices start on 1 in the paper.
-        #*The slicing goes up to u_estimate - 1 (exclusive) because we are
+        #*The slicing goes up to u_estimate.size - 1 (exclusive) because we are
         #*taking u_1^{2i-2} from u_1^{2i-1} (u_estimate)
         # print("Even i")
-        if u_estimate.size == 1:
-            odd_estimate: np.ndarray = np.array([])
-            even_estimate: np.ndarray = np.array([])
+        #*Taking u_1^{2i-2} (prev) as estimate and u_1^{2i-1} for the exponent
+        u_prev: np.ndarray = u_estimate[:-1]
+        u_exp: np.ndarray = u_estimate[-1]
+        if u_prev.size == 0:
             sum_estimate: np.ndarray = np.array([])
+            even_estimate: np.ndarray = np.array([])
         else:
-            #*Taking u_1^{2i-2} as estimate and u_1^{2i-1} for the exponent
-            odd_estimate: np.ndarray = u_estimate[ : u_estimate.size-1 : 2] #*0, 2, ... -> 1, 3, ...
-            even_estimate: np.ndarray = u_estimate[1 : u_estimate.size-1 : 2] #* 1, 3, ... -> 2, 4, ...
+            odd_estimate: np.ndarray = u_prev[::2] #*0, 2, ... -> 1, 3, ...
+            even_estimate: np.ndarray = u_prev[1::2] #* 1, 3, ... -> 2, 4, ...
             sum_estimate: np.ndarray = (odd_estimate + even_estimate) % 2
         # print("Odd estimate:", odd_estimate)
         # print("Even estimate:", even_estimate)
         # print("Sum estimate:", even_estimate)
-        try:
-            first_prod = L_i(half_i, y_1N[0:half_N], sum_estimate, base_channel)
-            # print("First prod", first_prod)
-            first_prod *= 1-2*u_estimate[u_estimate.size - 1]
-        except RuntimeWarning:
-            print("awefawefawef")
-        second_prod = L_i(half_i, y_1N[half_N:N], even_estimate, base_channel)
-        return first_prod * second_prod
+        exp = (1 - 2*u_exp)
+        left = L_i(half_i, lr_1N[0:half_N], sum_estimate, base_channel)
+        right = L_i(half_i, lr_1N[half_N:N], even_estimate, base_channel)
+
+        if left == np.inf:
+            if right == 0:
+                if exp == 1:
+                    return 1
+                else:
+                    return 0
+            elif right == np.inf and exp == -1:
+                return 1
+            else:
+                return (float(left)**exp) * right
+        elif left == 0:
+            if right == 0 and exp == -1:
+                return np.inf
+            elif right == np.inf:
+                if exp == 1:
+                    return 1
+                else:
+                    return np.inf
+            else:
+                return (float(left)**exp) * right
+        else:
+            return (float(left)**exp) * right
+        
+        # if left == 0 and u_exp == 1:
+        #     left = np.inf
+        # else:
+        #     left = left**(1 - 2*u_exp)
+        # print("First prod", left)
+        # print("First prod:", left, "| Second prod:", right)
+        # print(result)
+        # print(f"L_i(i={i}, N={N}) -> {result}")
         
     else:
-        if i != 1 or y_1N.size != 1:
+        if i != 1 or N != 1:
             # print("Odd i")
             half_i: int = int((i + 1) / 2) #*Because i = ((i + 1) / 2) - 1
-            #*The slicing goes up to u_estimate (exclusive) because
+            #*The slicing goes up to u_estimate.size (exclusive) because
             #*2 * half_i - 2 is even
             # print(type(half_N), half_N)
-            if u_estimate.size == 1:
-                odd_estimate: np.ndarray = np.array([])
+            if u_estimate.size == 0:
                 even_estimate: np.ndarray = np.array([])
                 sum_estimate: np.ndarray = np.array([])
             else:
-                odd_estimate: np.ndarray = u_estimate[: u_estimate.size : 2] #*0, 2, ... -> 1, 3, ...
-                even_estimate: np.ndarray = u_estimate[1: u_estimate.size : 2] #* 1, 3, ... -> 2, 4, ...
+                odd_estimate: np.ndarray = u_estimate[::2] #*0, 2, ... -> 1, 3, ...
+                even_estimate: np.ndarray = u_estimate[1::2] #* 1, 3, ... -> 2, 4, ...
                 sum_estimate: np.ndarray = (odd_estimate + even_estimate) % 2
             # print("Odd estimate:", odd_estimate)
             # print("Even estimate:", even_estimate)
             # print("Sum estimate:", even_estimate)
-            left: float = L_i(half_i, y_1N[0:half_N], sum_estimate, base_channel)
-            right: float = L_i(half_i, y_1N[half_N:N], even_estimate, base_channel)
-            num: float = left * right + 1
-            den: float = left + right
-            if den == 0:
-                return 100
+            left: float = L_i(half_i, lr_1N[0:half_N], sum_estimate, base_channel)
+            right: float = L_i(half_i, lr_1N[half_N:N], even_estimate, base_channel)
+            # if (left == np.inf and right == 0) or (right == np.inf and left == 0):
+            #     print("warning")
+            if left == np.inf and right == 0:
+                return 0
+            elif left == 0 and right == np.inf:
+                return 0
+            elif left == np.inf and right == np.inf:
+                return np.inf
+            elif (left == np.inf and right == 1) or (left == 1 and right == np.inf):
+                return 1
+            elif left == 0 and right == 0:
+                return np.inf
             else:
-                return num / den
+                num = left*right+1
+                den = left+right
+                if den == 0 and num != 0:
+                    return np.inf
+                else:
+                    return num / den
+            
         else: #*i = 1 AND N = 1; last recursive step
-            # print("HUFHA?")
-            one_rule: float = base_channel.w_rule(y_1N[0], 1)
-            if one_rule == 0:
-                return 100
-            else:
-                zero_rule: float = base_channel.w_rule(y_1N[0], 0)
-                return zero_rule / one_rule
+            return lr_1N[0]
+            # lr = lr_1N[0]
+            # if lr == 0:
+            #     return 1.0 #*uncertainty
+            # elif lr == np.inf: #*Received 1
+            #     return np.inf
+            # else: #*Received 0 (lr == -np.inf)
+            #     return 0.0
+            
+            # one_rule: float = base_channel.w_rule(lr_1N[0], 1)
+            # if one_rule == 0:
+            #     # print(f"L_i(i={i}, N={N}) -> {np.inf}")
+            #     return np.inf
+            # else:
+            #     zero_rule: float = base_channel.w_rule(lr_1N[0], 0)
+            #     # print(f"L_i(i={i}, N={N}) -> {zero_rule / one_rule}")
+            #     return zero_rule / one_rule
                 
 
-def h_i(i: int, y_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> int:
-    lr: float = L_i(i, y_1N, u_estimate, base_channel)
+def h_i(i: int, lr_1N: np.ndarray, u_estimate: np.ndarray, base_channel: AWGNChannel | BECChannel) -> int:
+    # print("----------------")
+    lr: float = L_i(i, lr_1N, u_estimate, base_channel)
     if lr >= 1:
         return 0
     else:
         return 1
 
-def sc_decode(frozen_bits: np.ndarray, y: np.ndarray, base_channel: AWGNChannel | BECChannel) -> np.ndarray:
-    print(y.size)
+def sc_decode(frozen_bits: np.ndarray, lr_1N: np.ndarray, base_channel: AWGNChannel | BECChannel) -> np.ndarray:
+    # print(y.size)
     u_i: float = None
     u_is: list[float] = []
 
-    for i in range(y.size): #*Traverse the indices
+    for i in range(lr_1N.size): #*Traverse the indices
         if i in frozen_bits:
             u_i = FROZEN_BIT_VALUE
         else:
-            u_i = h_i(i+1, y, np.array(u_is), base_channel)
+            u_i = h_i(i+1, lr_1N, np.array(u_is), base_channel)
         u_is.append(u_i)
 
     return np.array(u_is)
@@ -173,7 +225,8 @@ def sc_decode(frozen_bits: np.ndarray, y: np.ndarray, base_channel: AWGNChannel 
 if __name__ == "__main__":
     frozen_bits: list[int] = [0, 1, 2, 4]
     y_received: list[int] = [0, 0, 1, 0, 0, 0, 0, 0]
-    estimate: np.ndarray = sc_decode(np.array(frozen_bits), np.array(y_received), BECChannel(epsilon=0.5))
+    lrs = BECChannel(0.3).transmit(y_received, mode="lrs")
+    estimate: np.ndarray = sc_decode(np.array(frozen_bits), np.array(lrs), BECChannel(epsilon=0.5))
     print("--------------")
     print("Final estimate:", estimate)
     no_frozen_estimate = [int(estimate[i]) for i in range(estimate.size) if i not in frozen_bits]

@@ -1,4 +1,16 @@
 #*Venv
 .venv/
 
+#*Python cache
 __pycache__/
+*.py[cod]
+
+#*Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+*.whl
+*.tar.gz
+pip-wheel-metadata/

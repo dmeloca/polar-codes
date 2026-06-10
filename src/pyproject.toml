@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polar-codes"
+version = "0.1.0"
+description = "Utilities for polar code construction, encoding, and channel simulation."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy==2.4.6",
+]
+
+[tool.setuptools]
+packages = ["src.channels", "src.core"]
+
+[tool.setuptools.package-dir]
+"src" = "."
