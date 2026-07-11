@@ -94,7 +94,7 @@ def L_i(i: int, codeword: np.ndarray, lr_1N: np.ndarray, u_estimate: np.ndarray,
         #*they are done that way since the indices start on 1 in the paper.
         #*The slicing goes up to u_estimate.size - 1 (exclusive) because we are
         #*taking u_1^{2i-2} from u_1^{2i-1} (u_estimate)
-        print("Even i", i)
+        # print("Even i", i)
         #*Taking u_1^{2i-2} (prev) as estimate and u_1^{2i-1} for the exponent
         u_prev: np.ndarray = u_estimate[:-1]
         u_exp: np.ndarray = u_estimate[-1]
@@ -151,7 +151,7 @@ def L_i(i: int, codeword: np.ndarray, lr_1N: np.ndarray, u_estimate: np.ndarray,
         
     else:
         if N != 1: #*the i != 1 condition is redundant
-            print("Odd i", i)
+            # print("Odd i", i)
             half_i: int = int((i + 1) / 2) #*Because i = ((i + 1) / 2) - 1
             #*The slicing goes up to u_estimate.size (exclusive) because
             #*2 * half_i - 2 is even
@@ -237,9 +237,124 @@ def sc_decode(frozen_bits: np.ndarray, codeword: np.ndarray, lr_1N: np.ndarray, 
 
     return np.array(u_is)
 
+def f_llr(a: float, b: float) -> float:
+    """
+    Check-node LLR combining rule ("boxplus"), used for the odd branch
+    (i.e., u_i XOR u_{i+1}) of the L_i recursion.
+
+    Exact formula: 2 * atanh( tanh(a/2) * tanh(b/2) ). tanh saturates
+    smoothly to +-1 as its argument grows without bound, so this expression
+    stays well-defined for a, b in {-inf, ..., +inf} and never needs the
+    inf/0 special-casing that the likelihood-ratio version of L_i requires.
+    """
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return float(2 * np.arctanh(np.tanh(a / 2) * np.tanh(b / 2)))
+
+def g_llr(a: float, b: float, u: int) -> float:
+    """
+    Bit-node LLR combining rule, used for the even branch (i.e., u_{i+1}
+    alone, given a hard decision on u_i) of the L_i recursion.
+
+    result = (-1)^u * a + b. The only case this can't resolve is when a and
+    b are +inf and -inf after applying the sign: that means the two branches
+    are certain of contradictory bit values, which is treated as complete
+    uncertainty (LLR = 0) rather than left as NaN.
+    """
+    total: float = ((1 - 2 * u) * a) + b
+    return 0.0 if np.isnan(total) else float(total)
+
+def llr_i(i: int, llr_1N: np.ndarray, u_estimate: np.ndarray) -> float:
+    """
+    Recursively compute the LLR L_N^{(i)}(llr_1N, u_estimate).
+
+    This follows the exact same index bookkeeping as L_i (same halving of N,
+    same odd/even-i case split, same odd/even/sum estimate slicing) but
+    combines the two branch LLRs with f_llr/g_llr instead of multiplying
+    likelihood ratios, so no base_channel/codeword bookkeeping is needed.
+
+    Params
+    ------
+    - u_estimate: np.ndarray
+        Corresponds to u_1^{i-1} or u_1^{2*half_i - 2}
+    """
+    N: int = int(llr_1N.size)
+    half_N: int = int(N / 2)
+
+    if N == 1: #*Base case: the LLR straight from the channel
+        return float(llr_1N[0])
+
+    if i % 2 == 0:
+        half_i: int = int(i / 2)
+        #*Taking u_1^{2i-2} (prev) as estimate and u_1^{2i-1} for the sign
+        u_prev: np.ndarray = u_estimate[:-1]
+        u_exp: int = int(u_estimate[-1])
+        if u_prev.size == 0:
+            sum_estimate: np.ndarray = np.array([])
+            even_estimate: np.ndarray = np.array([])
+        else:
+            odd_estimate: np.ndarray = u_prev[::2] #*0, 2, ... -> 1, 3, ...
+            even_estimate: np.ndarray = u_prev[1::2] #* 1, 3, ... -> 2, 4, ...
+            sum_estimate: np.ndarray = (odd_estimate + even_estimate) % 2
+
+        left: float = llr_i(half_i, llr_1N[0:half_N], sum_estimate)
+        right: float = llr_i(half_i, llr_1N[half_N:N], even_estimate)
+        return g_llr(left, right, u_exp)
+    else:
+        half_i: int = int((i + 1) / 2) #*Because i = ((i + 1) / 2) - 1
+        if u_estimate.size == 0:
+            even_estimate: np.ndarray = np.array([])
+            sum_estimate: np.ndarray = np.array([])
+        else:
+            odd_estimate: np.ndarray = u_estimate[::2] #*0, 2, ... -> 1, 3, ...
+            even_estimate: np.ndarray = u_estimate[1::2] #* 1, 3, ... -> 2, 4, ...
+            sum_estimate: np.ndarray = (odd_estimate + even_estimate) % 2
+
+        left: float = llr_i(half_i, llr_1N[0:half_N], sum_estimate)
+        right: float = llr_i(half_i, llr_1N[half_N:N], even_estimate)
+        return f_llr(left, right)
+
+def h_i_llr(i: int, llr_1N: np.ndarray, u_estimate: np.ndarray) -> int:
+    """
+    Hard-decide u_i from its LLR. LLR = ln(W(y|0)/W(y|1)), so a
+    non-negative LLR favors 0 and a negative LLR favors 1.
+    """
+    llr: float = llr_i(i, llr_1N, u_estimate)
+    return 0 if llr >= 0 else 1
+
+def sc_decode_llr(frozen_bits: np.ndarray, llr_1N: np.ndarray) -> np.ndarray:
+    """
+    Successive Cancellation decoder operating on log-likelihood ratios.
+
+    Workflow: decide u_i in index order, force frozen
+    bits to FROZEN_BIT_VALUE, and grow u_estimate one hard decision at a
+    time, but drives the recursion through llr_i/h_i_llr instead of the
+    likelihood-ratio based L_i/h_i.
+    """
+    u_i: int = None
+    u_is: list[int] = []
+
+    for i in range(llr_1N.size): #*Traverse the indices
+        u_i = None
+        if i in frozen_bits:
+            u_i = FROZEN_BIT_VALUE
+        else:
+            u_i = h_i_llr(i + 1, llr_1N, np.array(u_is))
+        u_is.append(u_i)
+
+    return np.array(u_is)
+
 if __name__ == "__main__":
     frozen_bits: list[int] = [0, 1, 2, 4]
-    y_received: list[int] = [0, 0, 1, 0, 0, 0, 0, 0]
+    y_received: np.ndarray = np.array([0, 0, 1, 0, 0, 0, 0, 0])
+
+    llrs = BECChannel(0.3).transmit(y_received, mode="llrs")
+    llr_estimate: np.ndarray = sc_decode_llr(np.array(frozen_bits), llrs)
+    print("--------------")
+    print("LLR-domain final estimate:", llr_estimate)
+    no_frozen_llr_estimate = [int(llr_estimate[i]) for i in range(llr_estimate.size) if i not in frozen_bits]
+    print("Without the frozen bits:", no_frozen_llr_estimate)
+    print("--------------")
+
     lrs = BECChannel(0.3).transmit(y_received, mode="lrs")
     estimate: np.ndarray = sc_decode(np.array(frozen_bits), np.array(lrs), BECChannel(epsilon=0.5))
     print("--------------")
