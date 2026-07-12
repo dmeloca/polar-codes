@@ -21,7 +21,9 @@ class BECChannel:
             lrs[erased] = 1.0 #*Uncertainty
             return lrs
         else:
+            #*received 0 -> inf | received 1 -> -inf
             llrs = np.where(codeword == 0, np.inf, -np.inf).astype(np.float64)
+            #*received 0/1 -> ? (erasure symbol) with proba epsilon
             erased = np.random.random(len(codeword)) < self.epsilon
             llrs[erased] = 0.0
             return llrs

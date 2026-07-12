@@ -130,3 +130,20 @@ without any change needed in `encoder.py`. Both `sc_decode` and
 `sc_decode_llr` now decode all 16 messages correctly for a noiseless
 `N=8, K=4` BEC, and get 100%/99.99% correct over 8000 randomized trials on
 AWGN (4 dB) and BEC (ε=0.05) respectively.
+
+# BP decoder
+Equations used to update the `R` and `L` matrices (or the graph's nodes' values):
+
+> R-sweep (left-to-right)
+>
+> - if i is top (j = i + d):   R[i][s] = f( R[i][s-1] , L[j][s] + R[j][s-1] )
+> 
+> - if i is bottom (j = i - d):  R[i][s] = f( R[j][s-1] , L[j][s] ) + R[i][s-1]
+
+> L-sweep (right-to-left):
+>
+> - if i is top   (j = i + d):   L[i][s-1] = f( L[i][s] , L[j][s] + R[j][s-1] )
+>
+> - if i is bottom (j = i - d):  L[i][s-1] = f( R[j][s-1] , L[j][s] ) + L[i][s]
+
+Note: here, "top" means it is a "+" node, while bottom means it is an "=" node.
