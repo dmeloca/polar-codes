@@ -3,9 +3,19 @@ from typing import List, Tuple
 import numpy as np
 
 from .encoder import PolarEncoder, PolarCode
+from .generator import _bit_reverse
 
 def _int_to_bits(value: int, num_bits: int) -> np.ndarray:
     return np.array([(value >> i) & 1 for i in range(num_bits - 1, -1, -1)], dtype=int)
+
+def _bit_reverse_perm(N: int) -> list[int]:
+    """
+    Maps between the graph's node order (based on F^n) and the encoder's
+    codeword order (based on G = F^n B_n) so LLRs/beliefs on the x-side of the
+    graph line up with `encoder.encode()`'s output.
+    """
+    n_stages: int = int(np.log2(N))
+    return [_bit_reverse(i, n_stages) for i in range(N)]
 
 def _build_bit_indices(N: int) -> list[np.ndarray]:
     indices: list[np.ndarray] = []
@@ -55,7 +65,8 @@ def _initialize_R(N: int, frozen_bits: frozenset) -> np.ndarray:
     """
     Initialize left-to-right sweep matrix with the left-most column containing
     the estimate of u, of which, initially, we only know the frozen bits'
-    values (the remaining entries are set to 0).
+    values (the remaining entries are set to 0). It is an N x (log(N) + 1)
+    matrix.
 
     Parameters
     ----------
@@ -70,11 +81,14 @@ def _initialize_R(N: int, frozen_bits: frozenset) -> np.ndarray:
             R[i][0] = 30
     return R
 
-def _initialize_L(N: int, llr_1N: np.ndarray) -> np.ndarray:
+def _initialize_L(N: int, llr_1N: np.ndarray, perm: list[int]) -> np.ndarray:
     """
     Initialize right-to-left sweep matrix with the right-most column being the
     LLRs returned after transmitting u through the channel (the remaining
-    entries are set to 0).
+    entries are set to 0). It is an N x (log(N) + 1) matrix. It applies the
+    bit-reversal permutation from `_bit_reverse_perm` to its last column, which
+    is in the codeword side (the one after F^n has been applied and therefore
+    B_N needs to be applied next).
 
     Parameters
     ----------
@@ -82,12 +96,15 @@ def _initialize_L(N: int, llr_1N: np.ndarray) -> np.ndarray:
         Codeword length.
     - llr_1N: np.ndarray
         Indices of the frozen bits.
+    - perm: list[int]
+        Bit-reversal permutation (see _bit_reverse_perm) mapping codeword
+        order to the graph's node order.
     """
     n_cols: int = int(np.log2(N) + 1)
     L: np.ndarray = np.zeros((N, n_cols))
     llr_1N = np.where(llr_1N == np.inf, 30, llr_1N)
     llr_1N = np.where(llr_1N == -np.inf, -30, llr_1N)
-    L[:, n_cols - 1] = llr_1N
+    L[:, n_cols - 1] = llr_1N[perm]
     return L
 
 def _right_sweep(R: np.ndarray, L: np.ndarray, graph: List[List[Tuple[str, int]]]) -> np.ndarray:
@@ -129,8 +146,9 @@ def bp_decode(frozen_bits: frozenset, llr_1N: np.ndarray, iter_cap: int = 1000) 
     K: int = len(frozen_bits)
     bit_indices: list[np.ndarray] = _build_bit_indices(N)
     graph: List[List[Tuple[str, int]]] = _build_graph(N, bit_indices)
+    perm: list[int] = _bit_reverse_perm(N)
     R: np.ndarray = _initialize_R(N, frozen_bits)
-    L: np.ndarray = _initialize_L(N, llr_1N)
+    L: np.ndarray = _initialize_L(N, llr_1N, perm)
     # print("initial L:")
     # for row in L:
     #     print(row)
@@ -157,7 +175,11 @@ def bp_decode(frozen_bits: frozenset, llr_1N: np.ndarray, iter_cap: int = 1000) 
         u_hat: np.ndarray = np.array(u_hat_lst)
         # print(u_hat)
         x_hat: np.ndarray = encoder.encode(u_hat)
-        x_belief: np.ndarray = ((R[:,int(np.log2(N))-1] + L[:,int(np.log2(N))-1]) < 0).astype(int)
+        #*R/L's last column is in the graph's node order (see _bit_reverse_perm);
+        #*bit-reversal is an involution, so indexing by perm again undoes it
+        #*and lines the belief up with x_hat's encoder-order codeword.
+        x_belief_graph: np.ndarray = ((R[:,int(np.log2(N))] + L[:,int(np.log2(N))]) < 0).astype(int)
+        x_belief: np.ndarray = x_belief_graph[perm]
         if (x_hat == x_belief).all():
             break
         i += 1
