@@ -44,7 +44,12 @@ def _phi_inv(y: float) -> float:
         return 0.0
     if y <= 0.0:
         return float("inf")
-    lo, hi = 0.0, 1000.0
+    # φ is decreasing, so grow the bracket until it actually contains the root
+    # rather than assuming a fixed cap: μ⁺ = 2μ doubles every stage, so the means
+    # run past any constant bound once n is large enough (μ > 1000 at N=128, 3 dB)
+    lo, hi = 0.0, 1.0
+    while _phi(hi) > y and hi < 1e12:
+        lo, hi = hi, hi * 2.0
     for _ in range(60):
         mid = (lo + hi) * 0.5
         if _phi(mid) > y:
@@ -54,31 +59,35 @@ def _phi_inv(y: float) -> float:
     return (lo + hi) * 0.5
 
 
-def _awgn_reliabilities(n: int, snr_db: float) -> np.ndarray:
+def _awgn_reliabilities(n: int, esn0_db: float) -> np.ndarray:
     """
     Evolve LLR means through n polarization stages.
-    snr_db is Eb/N0 in dB for BPSK-AWGN.
+    esn0_db is Es/N0 in dB for BPSK-AWGN, matching AWGNChannel's convention
+    (see its docstring for the Eb/N0 relation).
     """
-    snr = 10.0 ** (snr_db / 10.0)
-    # initial LLR mean for BPSK: μ₀ = 2/σ² = 4·(Eb/N0)
-    mu = np.array([4.0 * snr])
+    esn0 = 10.0 ** (esn0_db / 10.0)
+    # initial LLR mean for BPSK: μ₀ = 2/σ² = 4·(Es/N0)
+    mu = np.array([4.0 * esn0])
     for _ in range(n):
         mu_new = np.empty(2 * len(mu))
-        mu_new[0::2] = 2.0 * mu  # bad (−): μ⁻ = 2μ
-        mu_new[1::2] = np.array(
-            [_phi_inv(_phi(m) ** 2) for m in mu]
-        )  # good (+): φ(μ⁺) = φ(μ)²
+        # bad (−): φ(μ⁻) = 1 − (1 − φ(μ))², which is < μ. Evaluated in the factored
+        # form φ·(2 − φ) because 1 − (1 − φ)² cancels to exactly 0 once φ is small
+        # enough to vanish against the 1.0, which would send μ⁻ to +inf.
+        mu_new[0::2] = np.array([_phi_inv(p * (2.0 - p)) for p in map(_phi, mu)])
+        mu_new[1::2] = 2.0 * mu  # good (+): μ⁺ = 2μ
         mu = mu_new
     return mu
 
 
-def awgn_frozen_set(N: int, K: int, snr_db: float) -> frozenset[int]:
+def awgn_frozen_set(N: int, K: int, esn0_db: float) -> frozenset[int]:
     """
     Gaussian approximation construction for AWGN with BPSK.
-    snr_db is Eb/N0 in dB.
+    esn0_db is Es/N0 in dB, the same convention AWGNChannel takes -- pass both
+    the same value, or the code is designed for a different operating point
+    than the channel delivers.
     Freezes the N-K least reliable synthetic channels.
     """
     n = int(np.log2(N))
-    mu = _awgn_reliabilities(n, snr_db)
+    mu = _awgn_reliabilities(n, esn0_db)
     # ascending sort: first N-K positions have smallest μ (least reliable → frozen)
     return frozenset(int(i) for i in np.argsort(mu)[: N - K])

@@ -7,13 +7,28 @@ class AWGNChannel:
 
     Transmit pipeline: binary codeword → BPSK symbols → additive noise → LLRs.
     LLR sign convention: positive = likely 0, negative = likely 1.
+
+    The SNR is **Es/N0** (energy per transmitted *symbol*), not Eb/N0 (energy per
+    *information bit*). A channel carries symbols and has no notion of a code
+    rate, so it cannot convert between the two on its own. For a rate R = K/N
+    code the relation is
+
+        Es/N0 (dB) = Eb/N0 (dB) + 10·log10(R)
+
+    i.e. Es/N0 sits 3.01 dB *below* Eb/N0 at R = 1/2. Convert at the experiment
+    level, where R is known. Published polar-code curves are conventionally
+    plotted against Eb/N0, so compare against them only after converting.
+
+    `awgn_frozen_set` in core/construction.py takes the same Es/N0 convention;
+    the two must be given matching values or the code is designed for a
+    different operating point than the channel delivers.
     """
 
-    def __init__(self, snr_db: float) -> None:
-        self.snr_db = snr_db
-        snr = 10.0 ** (snr_db / 10.0)
-        # For unit-amplitude BPSK: Eb = 1, σ² = 1/(2·Eb/N0)
-        self._sigma = np.sqrt(1.0 / (2.0 * snr))
+    def __init__(self, esn0_db: float) -> None:
+        self.esn0_db = esn0_db
+        esn0 = 10.0 ** (esn0_db / 10.0)
+        # For unit-amplitude BPSK: Es = 1, σ² = 1/(2·Es/N0)
+        self._sigma = np.sqrt(1.0 / (2.0 * esn0))
 
     def transmit(self, codeword: np.ndarray) -> np.ndarray:
         """
