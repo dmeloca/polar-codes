@@ -330,19 +330,18 @@ def sc_decode_llr(frozen_bits: np.ndarray, llr_1N: np.ndarray, ca: bool = False)
     bits to FROZEN_BIT_VALUE, and grow u_estimate one hard decision at a
     time, but drives the recursion through llr_i/h_i_llr instead of the
     likelihood-ratio based L_i/h_i.
+
+    Delegates to scl._scl_core at L=1, which computes exactly this but reuses
+    intermediate LLRs across bits (O(N log N) instead of re-descending from the
+    channel per bit); llr_i/h_i_llr above are the same recursion written out
+    directly and are kept as the readable reference. `clip=False` leaves +-inf
+    LLRs untouched, matching what this function has always fed f_llr/g_llr.
     """
-    u_i: int = None
-    u_is: list[int] = []
+    from .scl import _scl_core
 
-    for i in range(llr_1N.size): #*Traverse the indices
-        u_i = None
-        if i in frozen_bits:
-            u_i = FROZEN_BIT_VALUE
-        else:
-            u_i = h_i_llr(i + 1, llr_1N, np.array(u_is))
-        u_is.append(u_i)
-
-    return np.array(u_is)
+    frozen_set = frozenset(int(i) for i in np.asarray(list(frozen_bits)).ravel())
+    u_paths, _, _ = _scl_core(frozen_set, llr_1N, 1, np, clip=False)
+    return u_paths[0].astype(int)
 
 def ca_scl_finish(path_bits, path_metrics, crc: CRC, m: int):
     """

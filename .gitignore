@@ -5,6 +5,9 @@
 __pycache__/
 *.py[cod]
 
+#*Experiment results
+results/
+
 #*Python packaging
 build/
 dist/

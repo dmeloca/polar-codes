@@ -370,12 +370,16 @@ def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, it
     - use_gpu: bool
         Whether to run the sweeps on the GPU through CuPy.
     """
-    def _choose_u_hat(x_hat_all: np.ndarray, transmitted_x: np.ndarray, dist: str = "euclidean") -> np.ndarray:
+    def _rank_graphs(x_hat_all: np.ndarray, transmitted_x: np.ndarray, dist: str = "euclidean") -> Tuple[int, np.ndarray]:
         """
-        Chooses the x_hat closest to the transmitted codeword and its index (so
-        that u_hat can be inferred). It also returns the distances of all the
-        candidate codewords in `x_hat_all` to the transmitted codeword
+        Scores every graph's codeword estimate against the channel observation,
+        returning the index of the closest graph and the distances of all the
+        candidate codewords in `x_hat_all` to the transmitted one
         (`transmitted_x`).
+
+        Returns the graph *index* rather than a codeword: x_hat_all holds
+        length-N codewords, whereas every bpl_decode return path is contracted
+        to hand back the K information bits, which only u_all carries.
         """
         x_hat_bipolar: np.ndarray = xp.where(x_hat_all == 0, 1, -1)
         transmitted_bipolar: np.ndarray = xp.where(xp.asarray(transmitted_x) == 0, 1, -1)
@@ -388,7 +392,7 @@ def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, it
             #*count, weighted by how reliable (|LLR|) that decision was
             mismatches: np.ndarray = x_hat_all != xp.asarray(transmitted_x)
             distances: np.ndarray = xp.sum(xp.abs(xp.asarray(llr_1N)) * mismatches, axis=1)
-        return x_hat_all[np.argmin(distances)], distances.min(), distances
+        return int(xp.argmin(distances)), distances
 
     xp = cp if use_gpu else np
     N: int = llr_1N.size
@@ -440,8 +444,8 @@ def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, it
         i += 1
 
     #*Run CRC on the L graphs after converging or getting to iter_cap
+    best_i, distances = _rank_graphs(x_hat_all, transmitted_x, "euclidean")
     if ca:
-        _, _, distances = _choose_u_hat(x_hat_all, transmitted_x, "euclidean")
         graph_us: np.ndarray = u_all[:, info_positions] #*(L, K) info+CRC bits per graph
         m: int = len(info_positions) - crc.R #*message length, excluding the appended CRC bits
         u_hat_candidate, passed = ca_bpl_hard(
@@ -451,5 +455,9 @@ def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, it
         if passed:
             return (cp.asnumpy(u_hat_candidate) if use_gpu else u_hat_candidate), True
 
-    best_u_hat, best_dist, _ = _choose_u_hat(x_hat_all, transmitted_x, "euclidean")
+    #*Best-effort fallback: the closest graph's information bits, truncated to the
+    #*payload under ca so that both ca return paths agree on what they hand back
+    best_u_hat: np.ndarray = u_all[best_i][info_positions]
+    if ca:
+        best_u_hat = best_u_hat[:m]
     return (cp.asnumpy(best_u_hat) if use_gpu else best_u_hat), False

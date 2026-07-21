@@ -1,3 +1,4 @@
+import math
 from typing import Tuple
 
 import numpy as np
@@ -54,58 +55,143 @@ def _softplus(x):
     return xp.logaddexp(xp.zeros_like(x), x)
 
 
-def _batched_llr_i(i: int, llr_1N_batch, u_estimate_batch):
+def _trailing_zeros(j: int) -> int:
+    """Index of the lowest set bit of j (j must be > 0)."""
+    return (j & -j).bit_length() - 1
+
+
+def _scl_core(frozen_bits: frozenset, llr_1N, L: int, xp, clip: bool):
     """
-    Batched version of sc.llr_i.
+    Shared O(N log N) SC/SCL engine, in the log-LR domain.
 
-    Parameters
-    ----------
-    i : int
-        1-indexed position (same convention as sc.llr_i).
-    llr_1N_batch : array of shape (L_active, N)
-        Channel LLRs sliced to the current sub-channel, replicated per path.
-    u_estimate_batch : array of shape (L_active, k)
-        Decision prefix per path (k = i-1 at the top level, halves as recursion descends).
-    Returns
-    -------
-    array of shape (L_active,) with the LLR of u_i for each path.
+    Computes exactly the same quantities as sc.llr_i's recursion (same f/g
+    rules, same index bookkeeping, same +-inf conventions), but keeps the
+    intermediate LLRs between successive bit decisions instead of rebuilding
+    the whole recursion tree from the channel at every bit.
+
+    The layout follows Arikan's index recursion directly. Depth d holds one
+    LLR per *node* (2**d of them), not one per channel position: depth 0 is
+    the root, whose single LLR decides u_j, and depth n is the channel. Node
+    t at depth d covers channel positions [t*N/2**d, (t+1)*N/2**d) and has
+    children 2t and 2t+1 at depth d+1. The LLR that node t needs is the one
+    for its own bit index floor(j / 2**d), so depth d only goes stale once
+    every 2**d bits. Recomputing it then costs 2**d combines, i.e. N per
+    depth across the whole word, hence O(N log N) overall rather than the
+    O(N**2) of re-descending from the channel per bit.
+
+    Returns (u_paths, PM, L_active): the full length-N decision vector per
+    surviving path, their path metrics (lower = more likely), and how many
+    of the L slots are live.
     """
-    xp = _xp_of(llr_1N_batch)
-    L_active, N = llr_1N_batch.shape
-    half_N = N // 2
+    llr = xp.asarray(llr_1N, dtype=xp.float64)
+    if clip:
+        #*Clip infinities (BEC emits +-inf on unerased positions) so metrics stay finite.
+        #*A single +-inf cost would saturate the path metric and destroy discrimination
+        #*between candidates on later bits (argsort ties break arbitrarily). +-30 matches
+        #*the clip bp.py's _initialize_L uses and keeps arctanh/tanh well away from +-1.
+        llr = xp.where(llr == xp.inf, 30.0, llr)
+        llr = xp.where(llr == -xp.inf, -30.0, llr)
+    N: int = int(llr.size)
+    n: int = int(round(math.log2(N)))
 
-    if N == 1:
-        return llr_1N_batch[:, 0]
+    #*alpha[d]: current LLR of each of the 2**d nodes at depth d, per path.
+    #*beta[d]: that node's own last decided pair of bits (even slot, odd slot);
+    #*the even slot is what its g-combine consumes on the following bit.
+    #*Depth n is the channel itself, which is path-independent and never
+    #*rewritten, so it stays a plain (N,) array outside these lists.
+    alpha = [xp.zeros((L, 1 << d), dtype=xp.float64) for d in range(n)]
+    beta = [xp.zeros((L, 1 << d, 2), dtype=xp.int8) for d in range(n)]
+    u_paths = xp.zeros((L, N), dtype=xp.int8)
+    PM = xp.zeros(L, dtype=xp.float64)
+    L_active: int = 1
 
-    if i % 2 == 0:
-        half_i = i // 2
-        u_prev = u_estimate_batch[:, :-1]
-        u_exp = u_estimate_batch[:, -1]
+    #*Children of the deepest node layer are channel observations; slicing them
+    #*once here keeps them out of the per-bit path.
+    chan_even = llr[0::2]
+    chan_odd = llr[1::2]
 
-        if u_prev.shape[1] == 0:
-            sum_estimate = xp.zeros((L_active, 0), dtype=xp.int8)
-            even_estimate = xp.zeros((L_active, 0), dtype=xp.int8)
+    arange_cache: dict = {}
+
+    def _arange(m: int):
+        if m not in arange_cache:
+            arange_cache[m] = xp.arange(m)
+        return arange_cache[m]
+
+    for j in range(N):
+        #*Refresh every depth whose bit index floor(j / 2**d) just advanced.
+        #*j and j-1 differ exactly in bits 0..tz, so depths above tz are still
+        #*holding the LLR they were asked for last bit.
+        d_start: int = n - 1 if j == 0 else min(_trailing_zeros(j), n - 1)
+        for d in range(d_start, -1, -1):
+            if d == n - 1:
+                a, b = chan_even, chan_odd
+            else:
+                a = alpha[d + 1][:L_active, 0::2]
+                b = alpha[d + 1][:L_active, 1::2]
+            if (j >> d) & 1:
+                alpha[d][:L_active] = _g_llr(a, b, beta[d][:L_active, :, 0])
+            else:
+                alpha[d][:L_active] = _f_llr(a, b)
+
+        llrs = alpha[0][:L_active, 0]  #*root LLR of u_j, one per path
+
+        cost0 = _softplus(-llrs)  #*cost of choosing u_j = 0
+        cost1 = _softplus(llrs)   #*cost of choosing u_j = 1
+
+        if j in frozen_bits:
+            #*No branching: force u_j = FROZEN_BIT_VALUE and pay the associated cost
+            PM[:L_active] += cost0
+            u_paths[:L_active, j] = FROZEN_BIT_VALUE
         else:
-            odd_estimate = u_prev[:, ::2]
-            even_estimate = u_prev[:, 1::2]
-            sum_estimate = (odd_estimate + even_estimate) % 2
+            #*Branching: each path spawns two candidates (u_j = 0, u_j = 1).
+            cand_metrics = xp.concatenate([PM[:L_active] + cost0,
+                                           PM[:L_active] + cost1])
+            cand_u = xp.concatenate([xp.zeros(L_active, dtype=xp.int8),
+                                     xp.ones(L_active, dtype=xp.int8)])
+            cand_parent = xp.concatenate([_arange(L_active), _arange(L_active)])
 
-        left = _batched_llr_i(half_i, llr_1N_batch[:, :half_N], sum_estimate)
-        right = _batched_llr_i(half_i, llr_1N_batch[:, half_N:], even_estimate)
-        return _g_llr(left, right, u_exp)
+            #*Secondary tiebreak: when candidate metrics are equal (e.g., both +inf
+            #*because internal LLRs saturated to +-inf via g-node cascades even with
+            #*clipped channel input), prefer the u that matches sign(llr) so L=1 SCL
+            #*still agrees with sc.h_i_llr's `0 if llr >= 0 else 1` rule.
+            h = (llrs < 0).astype(xp.int8)  #*SC's hard decision per active path
+            tie_keys = xp.concatenate([h, 1 - h])  #*0 = preferred, 1 = alternative
+            #*lexsort: LAST key is primary, so we sort by metric first, then by tie_key.
+            order = xp.lexsort(xp.stack([tie_keys, cand_metrics]))
 
-    half_i = (i + 1) // 2
-    if u_estimate_batch.shape[1] == 0:
-        sum_estimate = xp.zeros((L_active, 0), dtype=xp.int8)
-        even_estimate = xp.zeros((L_active, 0), dtype=xp.int8)
-    else:
-        odd_estimate = u_estimate_batch[:, ::2]
-        even_estimate = u_estimate_batch[:, 1::2]
-        sum_estimate = (odd_estimate + even_estimate) % 2
+            new_L: int = min(L, 2 * L_active)
+            keep = order[:new_L]
+            parent_idx = cand_parent[keep]
 
-    left = _batched_llr_i(half_i, llr_1N_batch[:, :half_N], sum_estimate)
-    right = _batched_llr_i(half_i, llr_1N_batch[:, half_N:], even_estimate)
-    return _f_llr(left, right)
+            #*Surviving paths inherit their parent's whole decoder state, so the
+            #*kept LLRs/partial sums have to be gathered alongside the decisions.
+            gathered = u_paths[parent_idx]
+            gathered[:, j] = cand_u[keep]
+            u_paths[:new_L] = gathered
+            PM[:new_L] = cand_metrics[keep]
+            for d in range(n):
+                alpha[d][:new_L] = alpha[d][parent_idx]
+                beta[d][:new_L] = beta[d][parent_idx]
+
+            L_active = new_L
+
+        #*Push the decision back down the tree. A node hands its children a
+        #*completed pair (b_even, b_odd) as (b_even ^ b_odd) on the left and
+        #*b_odd on the right -- the same u_o ^ u_e / u_e split sc.llr_i slices
+        #*out of its history -- and only once that pair exists, i.e. while the
+        #*bit of j at that depth is 1.
+        if n:
+            beta[0][:L_active, 0, j & 1] = u_paths[:L_active, j]
+            d = 0
+            while d < n - 1 and (j >> d) & 1:
+                b0 = beta[d][:L_active, :, 0]
+                b1 = beta[d][:L_active, :, 1]
+                parity = (j >> (d + 1)) & 1
+                beta[d + 1][:L_active, 0::2, parity] = b0 ^ b1
+                beta[d + 1][:L_active, 1::2, parity] = b1
+                d += 1
+
+    return u_paths, PM, L_active
 
 
 def scl_decode(
@@ -130,8 +216,10 @@ def scl_decode(
     L : int, default 8
         List size. L=1 => plain SC.
     use_gpu : bool, default False
-        If True, allocate on the GPU via cupy and dispatch every helper through
-        cp.get_array_module, mirroring the pattern used in bp.bpl_decode.
+        If True, allocate on the GPU via cupy. Note that the sweep is inherently
+        sequential over the N bits and the per-bit arrays are small, so kernel
+        launch overhead dominates and this is typically *slower* than the CPU
+        path; bpl_decode is the decoder that actually benefits from the GPU.
 
     Returns
     -------
@@ -146,81 +234,14 @@ def scl_decode(
         raise RuntimeError("scl_decode(use_gpu=True) requires cupy to be installed.")
     xp = cp if use_gpu else np
 
-    llr_1N = xp.asarray(llr_1N, dtype=xp.float64)
-    #*Clip infinities (BEC emits +-inf on unerased positions) so metrics stay finite.
-    #*A single +-inf cost would saturate the path metric and destroy discrimination
-    #*between candidates on later bits (argsort ties break arbitrarily). +-30 matches
-    #*the clip bp.py's _initialize_L uses and keeps arctanh/tanh well away from +-1.
-    llr_1N = xp.where(llr_1N == xp.inf, 30.0, llr_1N)
-    llr_1N = xp.where(llr_1N == -xp.inf, -30.0, llr_1N)
-    N = int(llr_1N.size)
-
-    #*Broadcast the channel LLRs across all L path slots; only the first
-    #*L_active rows are meaningful at any given moment.
-    llr_1N_batch = xp.tile(llr_1N.reshape(1, N), (L, 1))
-
-    #*Full-length decision matrix; column i is filled at loop iteration i.
-    u_paths = xp.zeros((L, N), dtype=xp.int8)
-    PM = xp.zeros(L, dtype=xp.float64)
-    L_active = 1
-
-    arange_L_cache: dict = {}
-
-    def _arange(n: int):
-        if n not in arange_L_cache:
-            arange_L_cache[n] = xp.arange(n)
-        return arange_L_cache[n]
-
-    for i in range(N):
-        #*LLR at u_i for each active path
-        llrs = _batched_llr_i(i + 1, llr_1N_batch[:L_active], u_paths[:L_active, :i])
-
-        cost0 = _softplus(-llrs)  #*cost of choosing u_i = 0
-        cost1 = _softplus(llrs)   #*cost of choosing u_i = 1
-
-        if i in frozen_bits:
-            #*No branching: force u_i = FROZEN_BIT_VALUE and pay the associated cost
-            PM[:L_active] += cost0
-            u_paths[:L_active, i] = FROZEN_BIT_VALUE
-            continue
-
-        #*Branching: each path spawns two candidates (u_i = 0, u_i = 1).
-        cand_metrics = xp.concatenate([PM[:L_active] + cost0,
-                                       PM[:L_active] + cost1])
-        cand_u = xp.concatenate([xp.zeros(L_active, dtype=xp.int8),
-                                 xp.ones(L_active, dtype=xp.int8)])
-        cand_parent = xp.concatenate([_arange(L_active), _arange(L_active)])
-
-        #*Secondary tiebreak: when candidate metrics are equal (e.g., both +inf
-        #*because internal LLRs saturated to +-inf via g-node cascades even with
-        #*clipped channel input), prefer the u that matches sign(llr) so L=1 SCL
-        #*still agrees with sc.h_i_llr's `0 if llr >= 0 else 1` rule.
-        h = (llrs < 0).astype(xp.int8)  #*SC's hard decision per active path
-        tie_keys = xp.concatenate([h, 1 - h])  #*0 = preferred, 1 = alternative
-        #*lexsort: LAST key is primary, so we sort by metric first, then by tie_key.
-        order = xp.lexsort(xp.stack([tie_keys, cand_metrics]))
-
-        new_L = min(L, 2 * L_active)
-        keep = order[:new_L]
-        parent_idx = cand_parent[keep]
-
-        #*Gather the prefixes of the surviving paths from their parents.
-        #*fancy indexing returns a fresh array so the write below is safe.
-        gathered = u_paths[parent_idx]
-        gathered[:, i] = cand_u[keep]
-        u_paths[:new_L] = gathered
-        PM[:new_L] = cand_metrics[keep]
-
-        L_active = new_L
+    u_paths, PM, L_active = _scl_core(frozen_bits, llr_1N, L, xp, clip=True)
 
     best = int(xp.argmin(PM[:L_active]))
     u_hat = u_paths[best]
-
     if use_gpu:
         u_hat = cp.asnumpy(u_hat)
 
-    info_bits = np.array(
-        [int(u_hat[j]) for j in range(N) if j not in frozen_bits],
-        dtype=np.uint8,
-    )
-    return info_bits, True
+    N = int(u_hat.size)
+    info_mask = np.ones(N, dtype=bool)
+    info_mask[list(frozen_bits)] = False
+    return u_hat[info_mask].astype(np.uint8), True
