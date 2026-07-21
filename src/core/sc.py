@@ -2,6 +2,7 @@ import numpy as np
 
 from ..channels.awgn import AWGNChannel
 from ..channels.bec import BECChannel
+from .crc.crc import CRC
 
 FROZEN_BIT_VALUE: int = 0
 
@@ -321,7 +322,7 @@ def h_i_llr(i: int, llr_1N: np.ndarray, u_estimate: np.ndarray) -> int:
     llr: float = llr_i(i, llr_1N, u_estimate)
     return 0 if llr >= 0 else 1
 
-def sc_decode_llr(frozen_bits: np.ndarray, llr_1N: np.ndarray) -> np.ndarray:
+def sc_decode_llr(frozen_bits: np.ndarray, llr_1N: np.ndarray, ca: bool = False) -> np.ndarray:
     """
     Successive Cancellation decoder operating on log-likelihood ratios.
 
@@ -342,6 +343,20 @@ def sc_decode_llr(frozen_bits: np.ndarray, llr_1N: np.ndarray) -> np.ndarray:
         u_is.append(u_i)
 
     return np.array(u_is)
+
+def ca_scl_finish(path_bits, path_metrics, crc: CRC, m: int):
+    """
+    Runs CRC on all candidates and returns the first candidate to pass the CRC
+    along with a boolean indicating it or the closest one to the codeword.
+    path_bits: (L, K), path_metrics: (L,) lower = more likely.
+    """
+    passed = crc.check_batch(path_bits)          # (L,) bool, one matmul
+    if not passed.any():
+        best = np.argmin(path_metrics)            # no CRC survivor -> fall back to best metric
+    else:
+        candidates = np.where(passed)[0]
+        best = candidates[np.argmin(path_metrics[candidates])]
+    return path_bits[best, :m], passed[best]
 
 if __name__ == "__main__":
     frozen_bits: list[int] = [0, 1, 2, 4]
