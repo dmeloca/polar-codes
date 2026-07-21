@@ -7,6 +7,7 @@ import numpy as np
 
 from .encoder import PolarEncoder, PolarCode
 from .generator import _bit_reverse, build_generator
+from .crc.crc import CRC
 
 def _int_to_bits(value: int, num_bits: int) -> np.ndarray:
     # print(type(value), type(num_bits))
@@ -247,7 +248,7 @@ def bp_decode(frozen_bits: frozenset, llr_1N: np.ndarray, graph: List[List[Tuple
     i: int = 0
     u: list[int] = []
     N: int = llr_1N.size
-    K: int = len(frozen_bits)
+    K: int = N - len(frozen_bits)
     n_stages: int = int(math.log2(N))
     bit_indices: list[np.ndarray] = _build_bit_indices(N)
     if graph is None:
@@ -334,7 +335,19 @@ def _build_bpl_graphs(n_graphs: int, N: int) -> List[List[List[Tuple[str, int]]]
         graphs.append(permuted_graph)
     return graphs
 
-def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, iter_cap: int = 1000, use_gpu: bool = True) -> Tuple[np.ndarray, bool]:
+def ca_bpl_hard(graph_outputs: np.ndarray, distances, crc: CRC, m: int) -> tuple[np.ndarray, bool]:
+    """
+    Runs the CRC checks on all the graph's u's
+    raph_outputs: (L, K) hard bits from L permuted BP graphs, distances: (L,) to channel obs."""
+    passed = crc.check_batch(graph_outputs)
+    if not passed.any():
+        best = np.argmin(distances) #*Returns the first index of the best candidates (if multiple)
+    else:
+        candidates = np.where(passed)[0]
+        best = candidates[np.argmin(distances[candidates])]
+    return graph_outputs[best, :m], passed[best]
+
+def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, iter_cap: int = 1000, ca: bool = False, crc: CRC = None, use_gpu: bool = True) -> Tuple[np.ndarray, bool]:
     """
     BPL algorithm with random graph selection (for now). Every graph is decoded
     at once as an (L, N, log2(N)+1) tensor rather than one after another, and the
@@ -357,6 +370,26 @@ def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, it
     - use_gpu: bool
         Whether to run the sweeps on the GPU through CuPy.
     """
+    def _choose_u_hat(x_hat_all: np.ndarray, transmitted_x: np.ndarray, dist: str = "euclidean") -> np.ndarray:
+        """
+        Chooses the x_hat closest to the transmitted codeword and its index (so
+        that u_hat can be inferred). It also returns the distances of all the
+        candidate codewords in `x_hat_all` to the transmitted codeword
+        (`transmitted_x`).
+        """
+        x_hat_bipolar: np.ndarray = xp.where(x_hat_all == 0, 1, -1)
+        transmitted_bipolar: np.ndarray = xp.where(xp.asarray(transmitted_x) == 0, 1, -1)
+        #*Bipolar squared distance is 4x the Hamming distance,
+        #*since (+1 - -1)^2 = 4
+        if dist == "euclidean":
+            distances: np.ndarray = xp.sum((x_hat_bipolar - transmitted_bipolar) ** 2, axis=1)
+        else: #*reliability-weighted
+            #*Only bits disagreeing with the channel's hard decision
+            #*count, weighted by how reliable (|LLR|) that decision was
+            mismatches: np.ndarray = x_hat_all != xp.asarray(transmitted_x)
+            distances: np.ndarray = xp.sum(xp.abs(xp.asarray(llr_1N)) * mismatches, axis=1)
+        return x_hat_all[np.argmin(distances)], distances.min(), distances
+
     xp = cp if use_gpu else np
     N: int = llr_1N.size
     n_stages: int = int(math.log2(N))
@@ -380,11 +413,12 @@ def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, it
 
     i: int = 0
     u_all: np.ndarray = xp.zeros((n_graphs, N), dtype=xp.int32)
+    transmitted_x: np.ndarray = (llr_1N < 0)
     while i < iter_cap:
         R = _right_sweep_bpl(R, L, partner_arrs, is_plus_arrs)
         L = _left_sweep_bpl(R, L, partner_arrs, is_plus_arrs)
 
-        u_belief: np.ndarray = R[:,:,0] + L[:,:,0] #*taken from the sweeps of *LLRs*, (L, N)
+        u_belief: np.ndarray = R[:,:,0] + L[:,:,0] #*taken from the sweeps of LLRs, (L, N)
         u_all[:, info_positions] = (u_belief[:, info_positions] < 0) #*boolean hard-rule casted to int
         x_hat_all: np.ndarray = (u_all @ G) % 2 #*one batched encode for all L graphs
 
@@ -395,12 +429,27 @@ def bpl_decode(frozen_bits: frozenset, llr_1N: np.ndarray, n_graphs: int = 4, it
         x_belief_all: np.ndarray = x_belief_graph[:, perm_dev]
 
         #*Per graph, not across them: any single graph converging is a success.
+        #*Only trusted without CRC verification: with ca, a converged (self-consistent)
+        #*graph can still be a wrong fixed point, so the CRC check below decides instead.
         converged: np.ndarray = (x_hat_all == x_belief_all).all(axis=1) #*(L,)
-        if bool(converged.any()):
+        if bool(converged.any()) and not ca:
             u_hat: np.ndarray = u_all[int(converged.argmax())][info_positions]
             #*GPU to CPU conversion if necessary
             return (cp.asnumpy(u_hat) if use_gpu else u_hat), True
+
         i += 1
 
-    u_hat: np.ndarray = u_all[0][info_positions]
-    return (cp.asnumpy(u_hat) if use_gpu else u_hat), False
+    #*Run CRC on the L graphs after converging or getting to iter_cap
+    if ca:
+        _, _, distances = _choose_u_hat(x_hat_all, transmitted_x, "euclidean")
+        graph_us: np.ndarray = u_all[:, info_positions] #*(L, K) info+CRC bits per graph
+        m: int = len(info_positions) - crc.R #*message length, excluding the appended CRC bits
+        u_hat_candidate, passed = ca_bpl_hard(
+            cp.asnumpy(graph_us) if use_gpu else graph_us,
+            cp.asnumpy(distances) if use_gpu else distances,
+            crc, m)
+        if passed:
+            return (cp.asnumpy(u_hat_candidate) if use_gpu else u_hat_candidate), True
+
+    best_u_hat, best_dist, _ = _choose_u_hat(x_hat_all, transmitted_x, "euclidean")
+    return (cp.asnumpy(best_u_hat) if use_gpu else best_u_hat), False
