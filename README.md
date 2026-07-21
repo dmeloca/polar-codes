@@ -99,7 +99,8 @@ to the growing estimate before moving to the next position.
 from src.channels import BECChannel, AWGNChannel
 from src.core import sc_decode_llr
 
-llrs = AWGNChannel(snr_db=4.0).transmit(codeword)     # or BECChannel(eps).transmit(codeword, mode="llrs")
+llrs = AWGNChannel(esn0_db=4.0).transmit(codeword)    # Es/N0, not Eb/N0 -- see AWGNChannel's docstring
+                                                      # or BECChannel(eps).transmit(codeword, mode="llrs")
 estimate = sc_decode_llr(frozen_bits, llrs)
 info_bits = [int(estimate[i]) for i in range(estimate.size) if i not in frozen_bits]
 ```
