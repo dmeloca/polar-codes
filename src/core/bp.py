@@ -276,7 +276,7 @@ def bp_decode(frozen_bits: frozenset, llr_1N: np.ndarray, graph: List[List[Tuple
         else:
             R = _right_sweep_parallel(R, L, part_arrs, is_plus_arrs)
             L = _left_sweep_parallel(R, L, part_arrs, is_plus_arrs)
-        u_belief: np.ndarray = R[:,0] + L[:,0] #*taken from the sweeps of *LLRs*
+        u_belief: np.ndarray = R[:,0] + L[:,0] #*taken from the sweeps of LLRs
         u_hat_lst: list[int] = []
         for j, u_i in enumerate(u_belief):
             if j in frozen_bits:

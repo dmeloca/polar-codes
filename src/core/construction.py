@@ -44,8 +44,15 @@ def _phi_inv(y: float) -> float:
         return 0.0
     if y <= 0.0:
         return float("inf")
-    lo, hi = 0.0, 1000.0
-    for _ in range(60):
+    #*phi decays like exp(-mu/4), and the AWGN recursion below repeatedly squares
+    #*phi(mu) across polarization stages, so the target y shrinks doubly-exponentially
+    #*with N and can demand mu far past any small fixed bound. Expand the bracket
+    #*until it actually contains the root instead of silently saturating at a cap
+    #*(a fixed hi=1000 tied most "bad" sub-channels at N>=512 to the same wrong value).
+    lo, hi = 0.0, 10.0
+    while _phi(hi) > y:
+        hi *= 2.0
+    for _ in range(100):
         mid = (lo + hi) * 0.5
         if _phi(mid) > y:
             lo = mid
@@ -64,10 +71,10 @@ def _awgn_reliabilities(n: int, snr_db: float) -> np.ndarray:
     mu = np.array([4.0 * snr])
     for _ in range(n):
         mu_new = np.empty(2 * len(mu))
-        mu_new[0::2] = 2.0 * mu  # bad (−): μ⁻ = 2μ
+        mu_new[0::2] = 2.0 * mu  # good (+): μ⁻ = 2μ
         mu_new[1::2] = np.array(
             [_phi_inv(_phi(m) ** 2) for m in mu]
-        )  # good (+): φ(μ⁺) = φ(μ)²
+        )  # bad (-): φ(μ⁺) = φ(μ)²
         mu = mu_new
     return mu
 
